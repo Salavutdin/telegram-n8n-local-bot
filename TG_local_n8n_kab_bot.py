@@ -11,33 +11,41 @@ from dotenv import load_dotenv
 # Загружаем переменные окружения из .env
 load_dotenv()
 
-# Читаем токен бота из .env
+# Читаем токен бота
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("Не найден TELEGRAM_BOT_TOKEN в .env")
 
-# Указываем URL вебхука n8n (замени на свой!)
-# для тестирования N8N_WEBHOOK_URL = "http://localhost:5678/webhook-test/23467e56-1e59-4b55-a7d0-2ce125cc26ac"
-N8N_WEBHOOK_URL = "http://localhost:5678/webhook/23467e56-1e59-4b55-a7d0-2ce125cc26ac"
-FLASK_PORT = 8000  # Порт, на котором будет работать Flask
+# Читаем параметры n8n из .env
+N8N_PATH = os.getenv("N8N_WEBHOOK_PATH", "23467e56-1e59-4b55-a7d0-2ce125cc26ac")  # Можно менять по желанию
+N8N_MODE = os.getenv("N8N_MODE", "prod")  # "test" или "prod"
+N8N_BASE_URL = os.getenv("N8N_BASE_URL", "http://localhost:5678")
 
-# Создаем экземпляры бота и диспетчера aiogram
+# Автоматически выбираем URL вебхука в зависимости от режима
+if N8N_MODE == "test":
+    N8N_WEBHOOK_URL = f"{N8N_BASE_URL}/webhook-test/{N8N_PATH}"
+else:
+    N8N_WEBHOOK_URL = f"{N8N_BASE_URL}/webhook/{N8N_PATH}"
+
+# Порт, на котором работает Flask-сервер (используется n8n для ответа)
+FLASK_PORT = 8000
+
+# Создаем экземпляры aiogram-бота и диспетчера
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Создаем Flask-приложение
+# Flask-приложение для получения сообщений от n8n
 app = Flask(__name__)
 
-# Создаем новый event loop
+# Новый event loop для асинхронных задач
 loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
 
-# Обработчик входящих сообщений в Telegram
+# 📥 Приём сообщений от Telegram и отправка в n8n
 @dp.message(F.text)
 async def handle_message(message: Message):
     """
-    Когда пользователь отправляет сообщение боту, 
-    оно пересылается в n8n через вебхук.
+    Обрабатывает входящее сообщение от пользователя и пересылает его в n8n.
     """
     params = {
         "chat_id": message.chat.id,
@@ -45,47 +53,41 @@ async def handle_message(message: Message):
     }
     try:
         response = requests.get(N8N_WEBHOOK_URL, params=params)
-        await message.answer(f"Отправлено в n8n. Ответ: {response.text}")
+        # await message.answer(f"Отправлено в n8n. Ответ: {response.text}")
+        await message.answer(f"Секунду, печатаю...")
     except Exception as e:
         await message.answer(f"Ошибка при отправке в n8n: {e}")
 
-# Обработчик запросов из n8n (принимаем данные от n8n)
+# 📤 Приём ответа от n8n (из ноды HTTP Request)
 @app.route("/from-n8n", methods=["POST"])
 def from_n8n():
     """
-    n8n отправляет POST-запрос с chat_id и reply.
-    Бот получает эти данные и отправляет сообщение в Телеграм.
+    Получает POST-запрос от n8n и отправляет ответ пользователю в Telegram.
     """
     data = request.get_json()
     chat_id = data.get("chat_id")
     reply = data.get("reply")
-    
+
     if not chat_id or not reply:
         return {"error": "chat_id и reply обязательны"}, 400
-    
-    # Отправляем сообщение в Телеграм в основном event loop
+
+    # Асинхронная отправка сообщения
     loop.call_soon_threadsafe(
         asyncio.create_task,
         bot.send_message(chat_id=chat_id, text=reply)
     )
     return {"status": "ok"}
 
-# Запуск Flask в отдельном потоке
+# Запуск Flask-сервера в фоновом потоке
 def run_flask():
-    """
-    Запускаем Flask-сервер, чтобы принимать данные от n8n.
-    """
     app.run(host="0.0.0.0", port=FLASK_PORT)
 
-# Запуск бота aiogram
+# Запуск aiogram-бота
 async def run_bot():
-    """
-    Запускаем aiogram-бота в режиме поллинга.
-    """
     logging.basicConfig(level=logging.INFO)
     await dp.start_polling(bot)
 
-# Основной запуск
+# 🚀 Точка входа
 if __name__ == "__main__":
-    Thread(target=run_flask, daemon=True).start()  # Запускаем Flask в фоне
-    loop.run_until_complete(run_bot())  # Запускаем aiogram-бота
+    Thread(target=run_flask, daemon=True).start()
+    loop.run_until_complete(run_bot())
